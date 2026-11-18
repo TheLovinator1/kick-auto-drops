@@ -43,7 +43,6 @@ func (c *Client) Connect(
 		}
 
 		log.Println("🔌 Connecting to WebSocket...")
-		log.Printf("  → URL: wss://websockets.kick.com/viewer/v1/connect?token=%s...\n", token[:20])
 
 		wsURL := fmt.Sprintf("wss://websockets.kick.com/viewer/v1/connect?token=%s", token)
 		ws, _, err := c.wsDial.DialContext(ctx, wsURL, nil)
@@ -66,7 +65,6 @@ func (c *Client) Connect(
 		log.Println("  ✓ Connection established!")
 
 		// Run the message loop; if it returns an error we'll retry
-		log.Println("  → Starting message loop (ping/handshake every ~12s)...")
 		early, loopErr := c.messageLoop(ctx, ws, channelID, username, categoryID, progressChan)
 		ws.Close()
 
@@ -100,8 +98,6 @@ func (c *Client) messageLoop(
 	counter := 0
 	lastReport := time.Now()
 
-	log.Printf("  [WS] Message loop started for %s (channel %d, category %d)\n", username, channelID, categoryID)
-
 	// Get stream info to find the livestream_id
 	streamInfo, err := c.GetStreamInfo(username)
 	if err != nil {
@@ -123,7 +119,6 @@ func (c *Client) messageLoop(
 			if err := ws.WriteJSON(msg); err != nil {
 				return false, fmt.Errorf("write ping: %w", err)
 			}
-			log.Println("📤 ping")
 		} else {
 			msg := map[string]interface{}{
 				"type": "channel_handshake",
@@ -136,22 +131,14 @@ func (c *Client) messageLoop(
 			if err := ws.WriteJSON(msg); err != nil {
 				return false, fmt.Errorf("write handshake: %w", err)
 			}
-			log.Printf("🤝 handshake (channel %d)\n", channelID)
 		}
 
-		// Try to read a message (non-blocking, short timeout)
+		// Drain inbound frames (timeouts are expected); their contents are
+		// not used for drop tracking.
 		ws.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, msgBytes, readErr := ws.ReadMessage()
-		if readErr == nil && len(msgBytes) > 0 {
-			preview := string(msgBytes)
-			if len(preview) > 100 {
-				preview = preview[:100]
-			}
-			log.Printf("📥 Received: %s\n", preview)
-		}
+		_, _, _ = ws.ReadMessage()
 
 		delay := 11 + rand.Intn(6) // 11-16 seconds
-		log.Printf("⏳ Delay %ds\n", delay)
 
 		// Progress reporting every 60 seconds
 		now := time.Now()
@@ -197,7 +184,7 @@ func (c *Client) messageLoop(
 					}
 					return true, nil // early end
 				}
-				if info.GameID() != 0 && info.GameID() != categoryID {
+				if categoryID != 0 && info.GameID() != 0 && info.GameID() != categoryID {
 					log.Printf("  ✗ %s is playing another game (category %d)\n", username, info.GameID())
 					select {
 					case progressChan <- ProgressUpdate{Username: username, WatchedMillis: 60000}:
@@ -205,7 +192,6 @@ func (c *Client) messageLoop(
 					}
 					return true, nil // early end
 				}
-				log.Printf("  ✓ %s online\n", username)
 			}
 		}
 

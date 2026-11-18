@@ -52,6 +52,15 @@ var (
 	TreeRewardProgressStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color(colorUnclaimed))
 
+	// Reward currently being farmed
+	TreeRewardActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorInfo)).
+				Bold(true)
+
+	FooterTargetStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color(colorWarning)).
+				Bold(true)
+
 	// Status bar / footer — no border
 	FooterStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color(colorSubtext))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -199,7 +200,17 @@ func runStreamerMode(
 				continue
 			}
 
-			if info.GameID() != 0 && info.GameID() != categoryID {
+			// Use the category from the campaign that owns this reward. A
+			// CLI -category value, when set, takes precedence as a filter.
+			targetCategory := target.CategoryID
+			if categoryID != 0 {
+				if targetCategory != 0 && targetCategory != categoryID {
+					logCh <- fmt.Sprintf("⏭ Skipping %s (category %d ≠ %d)", target.Username, targetCategory, categoryID)
+					continue
+				}
+				targetCategory = categoryID
+			}
+			if targetCategory != 0 && info.GameID() != 0 && info.GameID() != targetCategory {
 				logCh <- fmt.Sprintf("✗ %s is playing another game (category %d)", target.Username, info.GameID())
 				sendStatusUpdate("", fmt.Sprintf("✗ %s wrong game", target.Username))
 				continue
@@ -210,15 +221,17 @@ func runStreamerMode(
 			watchDuration := time.Duration(remaining+120) * time.Second // +2 min buffer
 			logCh <- fmt.Sprintf("⏱ Watching %s for %v...", target.Username, watchDuration)
 			sendStatusUpdate(target.Username, "Watching...")
+			sendActiveDrop(mgr, false, targetCategory, target.Username, "")
 
 			// Rebuild tree with watching status
 			tree := buildTreeFromManager(nil, mgr, categoryNames)
 			sendTreeUpdate(logCh, tree)
 
-			earlyEnd, err := viewer.RunWithTimer(ctx, client, mgr, target.Username, categoryID, watchDuration, cookieMap)
+			earlyEnd, err := viewer.RunWithTimer(ctx, client, mgr, target.Username, targetCategory, false, watchDuration, cookieMap)
 			if err != nil {
 				logCh <- fmt.Sprintf("❌ Error watching %s: %v", target.Username, err)
 				sendStatusUpdate("", "Error")
+				clearActiveDrop()
 				time.Sleep(10 * time.Second)
 				continue
 			}
@@ -226,12 +239,14 @@ func runStreamerMode(
 			if earlyEnd {
 				logCh <- fmt.Sprintf("⚠ %s stream ended early, finding next...", target.Username)
 				sendStatusUpdate("", "Stream ended early")
+				clearActiveDrop()
 				time.Sleep(5 * time.Second)
 				break // re-collect usernames
 			}
 
 			logCh <- fmt.Sprintf("✅ Finished watching %s", target.Username)
 			sendStatusUpdate("", "Done, syncing...")
+			clearActiveDrop()
 
 			// Sync progress (no disk I/O, uses cached cookies)
 			if err := syncWithCookies(client, mgr, cookieMap); err != nil {
@@ -251,7 +266,9 @@ func runStreamerMode(
 	}
 }
 
-// runGeneralMode watches random streamers from a category.
+// runGeneralMode watches random streamers in every category that still has
+// unclaimed category-wide (type 2) rewards. The category comes from the
+// campaign itself; -category is only an optional filter (0 = all categories).
 func runGeneralMode(
 	ctx context.Context,
 	client *kick.Client,
@@ -268,63 +285,116 @@ func runGeneralMode(
 		default:
 		}
 
-		// Check if any general drops are still needed
-		remaining := mgr.GetRemainingTime("") // empty = fallback to general
-		if remaining <= 0 {
-			logCh <- "✅ General drops completed! Checking for more..."
+		categories := mgr.GeneralCategories()
+		if categoryID != 0 {
+			var filtered []int
+			for _, id := range categories {
+				if id == categoryID {
+					filtered = append(filtered, id)
+				}
+			}
+			categories = filtered
+		}
+
+		if len(categories) == 0 {
+			if categoryID != 0 {
+				logCh <- fmt.Sprintf("⏳ No active category-wide drops in category %d, checking again...", categoryID)
+			} else {
+				logCh <- "⏳ No active category-wide drops, checking again..."
+			}
+			sendStatusUpdate("", "Waiting for general drops")
+			clearActiveDrop()
+			if !sleepOrDone(ctx, 60*time.Second) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		for _, category := range categories {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// One watched stream advances every general reward in the
+			// category, so wait for the reward that needs the most time.
+			remaining := mgr.GeneralRemainingSeconds(category)
+			if remaining <= 0 {
+				continue
+			}
+
+			categoryName := categoryNames[category]
+			if categoryName == "" {
+				categoryName = fmt.Sprintf("category %d", category)
+			}
+
+			stream, err := client.GetRandomStreamFromCategory(category, 10)
+			if err != nil {
+				logCh <- fmt.Sprintf("⚠ No streams found in %s, retrying...", categoryName)
+				continue
+			}
+
+			username := stream.Channel.Slug
+			if username == "" {
+				username = stream.Channel.Username
+			}
+			logCh <- fmt.Sprintf("🎲 Selected random streamer in %s: %s", categoryName, username)
+
+			watchDuration := time.Duration(remaining+120) * time.Second
+			logCh <- fmt.Sprintf("⏱ Watching %s for %v (general drops in %s)...", username, watchDuration, categoryName)
+			sendStatusUpdate(username, "Watching general drops...")
+			sendActiveDrop(mgr, true, category, username, categoryName)
+			sendTreeUpdate(logCh, buildTreeFromManager(nil, mgr, categoryNames))
+
+			earlyEnd, err := viewer.RunWithTimer(ctx, client, mgr, username, category, true, watchDuration, cookieMap)
+			if err != nil {
+				logCh <- fmt.Sprintf("❌ Error watching %s: %v", username, err)
+				sendStatusUpdate("", "Error")
+				clearActiveDrop()
+				if !sleepOrDone(ctx, 10*time.Second) {
+					return ctx.Err()
+				}
+				continue
+			}
+
+			if earlyEnd {
+				logCh <- fmt.Sprintf("⚠ %s stream ended early", username)
+				sendStatusUpdate("", "Stream ended early")
+				clearActiveDrop()
+				if !sleepOrDone(ctx, 5*time.Second) {
+					return ctx.Err()
+				}
+				continue
+			}
+
+			logCh <- fmt.Sprintf("✅ Finished watching %s", username)
+			sendStatusUpdate("", "Syncing...")
+			clearActiveDrop()
+
 			if err := syncWithCookies(client, mgr, cookieMap); err != nil {
 				logCh <- fmt.Sprintf("⚠ Sync warning: %v", err)
 			}
 			sendRemainingTime(mgr)
-			tree := buildTreeFromManager(nil, mgr, categoryNames)
-			sendTreeUpdate(logCh, tree)
-			time.Sleep(60 * time.Second)
-			continue
+			sendTreeUpdate(logCh, buildTreeFromManager(nil, mgr, categoryNames))
 		}
 
-		// Find a random streamer
-		stream, err := client.GetRandomStreamFromCategory(categoryID, 10)
-		if err != nil {
-			logCh <- fmt.Sprintf("⚠ No streams found in category %d, retrying in 30s...", categoryID)
-			time.Sleep(30 * time.Second)
-			continue
+		if !sleepOrDone(ctx, 5*time.Second) {
+			return ctx.Err()
 		}
+	}
+}
 
-		username := stream.Channel.Username
-		logCh <- fmt.Sprintf("🎲 Selected random streamer: %s", username)
-
-		watchDuration := time.Duration(remaining+120) * time.Second
-		logCh <- fmt.Sprintf("⏱ Watching %s for %v...", username, watchDuration)
-		sendStatusUpdate(username, "Watching...")
-
-		earlyEnd, err := viewer.RunWithTimer(ctx, client, mgr, username, categoryID, watchDuration, cookieMap)
-		if err != nil {
-			logCh <- fmt.Sprintf("❌ Error watching %s: %v", username, err)
-			sendStatusUpdate("", "Error")
-			time.Sleep(10 * time.Second)
-			continue
-		}
-
-		if earlyEnd {
-			logCh <- fmt.Sprintf("⚠ %s stream ended early", username)
-			sendStatusUpdate("", "Stream ended early")
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		logCh <- fmt.Sprintf("✅ Finished watching %s", username)
-		sendStatusUpdate("", "Syncing...")
-
-		// Sync and update tree
-		if err := syncWithCookies(client, mgr, cookieMap); err != nil {
-			logCh <- fmt.Sprintf("⚠ Sync warning: %v", err)
-		}
-		sendRemainingTime(mgr)
-		tree := buildTreeFromManager(nil, mgr, categoryNames)
-		sendTreeUpdate(logCh, tree)
-
-		// Small delay before next iteration
-		time.Sleep(5 * time.Second)
+// sleepOrDone waits for d, unless the context is cancelled first. It reports
+// whether the full delay elapsed.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -340,6 +410,72 @@ func sendStatusUpdate(streamer, status string) {
 	if programRef != nil {
 		programRef.Send(StatusUpdateMsg{Streamer: streamer, Status: status})
 	}
+}
+
+// sendActiveDrop tells the TUI which rewards the current watch session is
+// farming, so the footer and the drop tree can highlight them.
+func sendActiveDrop(mgr *drops.Manager, general bool, categoryID int, username, categoryName string) {
+	ids, label := activeDropTargets(mgr, general, categoryID, username, categoryName)
+	if programRef != nil {
+		programRef.Send(ActiveDropMsg{RewardIDs: ids, Label: label})
+	}
+}
+
+// clearActiveDrop removes the active highlight from the UI.
+func clearActiveDrop() {
+	if programRef != nil {
+		programRef.Send(ActiveDropMsg{})
+	}
+}
+
+// activeDropTargets returns the unclaimed rewards a session will advance.
+// General sessions advance every category-wide reward in the category;
+// streamer sessions advance only rewards that list the watched streamer.
+func activeDropTargets(mgr *drops.Manager, general bool, categoryID int, username, categoryName string) ([]string, string) {
+	var ids []string
+	var labels []string
+	seen := make(map[string]bool)
+
+	for _, r := range mgr.GetRewards() {
+		if r.Claimed {
+			continue
+		}
+
+		var label string
+		if general {
+			if r.Type != 2 || (categoryID != 0 && r.CategoryID != categoryID) {
+				continue
+			}
+			label = r.CampaignName
+			if label == "" {
+				label = r.Name
+			}
+		} else {
+			if r.Type != 1 || !slices.Contains(r.Usernames, username) {
+				continue
+			}
+			label = r.Name
+		}
+
+		ids = append(ids, r.ID)
+		if label != "" && !seen[label] {
+			seen[label] = true
+			labels = append(labels, label)
+		}
+	}
+
+	if len(labels) == 0 {
+		switch {
+		case general && categoryName != "":
+			labels = append(labels, categoryName+" general drops")
+		case username != "":
+			labels = append(labels, username)
+		default:
+			labels = append(labels, "Current drop")
+		}
+	}
+
+	return ids, strings.Join(labels, ", ")
 }
 
 // sendRemainingTime calculates and sends the total remaining watch time.

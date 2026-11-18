@@ -31,6 +31,8 @@ type Model struct {
 	// Status
 	currentStreamer string
 	statusText      string
+	activeRewardIDs map[string]bool // rewards currently being farmed
+	activeDropLabel string
 
 	// Layout
 	width  int
@@ -145,6 +147,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ActiveDropMsg:
+		m.activeRewardIDs = make(map[string]bool, len(msg.RewardIDs))
+		for _, id := range msg.RewardIDs {
+			m.activeRewardIDs[id] = true
+		}
+		m.activeDropLabel = msg.Label
+		return m, nil
+
 	case TimerTickMsg:
 		if !m.quitting {
 			m.elapsed = time.Since(m.startTime)
@@ -227,7 +237,7 @@ func (m Model) View() string {
 	logPanel := LogPanelStyle.Render(logLines)
 
 	// ---- Tree panel ----
-	treeLines := renderTree(m.treeData, treeW)
+	treeLines := renderTree(m.treeData, treeW, m.activeRewardIDs)
 	treeLines = lipgloss.NewStyle().Width(treeW).Render(treeLines)
 	treeLines = padHeight(treeLines, contentH)
 	treePanel := TreePanelStyle.Render(treeLines)
@@ -249,8 +259,13 @@ func (m Model) View() string {
 	if m.totalRemaining > 0 {
 		timerStr = fmt.Sprintf("%s / %s", timerStr, formatDuration(m.totalRemaining))
 	}
-	footerText := fmt.Sprintf("⏱ %s  │  👤 %s  │  📡 %s  │  Ctrl+S save logs to disk",
-		timerStr, m.currentStreamer, m.statusText)
+	target := m.activeDropLabel
+	if target == "" {
+		target = "—"
+	}
+	footerText := fmt.Sprintf("⏱ %s  │  👤 %s  │  📡 %s  │  🎯 %s  │  Ctrl+S save logs",
+		timerStr, m.currentStreamer, m.statusText,
+		FooterTargetStyle.Render(truncateRunes(target, 36)))
 	footer := FooterStyle.Width(innerW).Render(footerText)
 
 	// ---- Full layout inside outer border ----
@@ -288,20 +303,20 @@ func padHeight(s string, h int) string {
 // ---- Tree rendering ----
 
 // renderTree renders the tree nodes as a string.
-func renderTree(nodes []*TreeNode, maxWidth int) string {
+func renderTree(nodes []*TreeNode, maxWidth int, activeIDs map[string]bool) string {
 	if len(nodes) == 0 {
 		return HelpStyle.Render("No drops data yet.\nWaiting for campaigns...")
 	}
 
 	var b strings.Builder
 	for _, node := range nodes {
-		renderNode(&b, node, "", true, maxWidth)
+		renderNode(&b, node, "", true, maxWidth, activeIDs)
 	}
 	return b.String()
 }
 
 // renderNode recursively renders a tree node with proper indentation.
-func renderNode(b *strings.Builder, node *TreeNode, prefix string, isLast bool, maxWidth int) {
+func renderNode(b *strings.Builder, node *TreeNode, prefix string, isLast bool, maxWidth int, activeIDs map[string]bool) {
 	// Build the connector
 	connector := "├── "
 	childPrefix := "│   "
@@ -335,6 +350,10 @@ func renderNode(b *strings.Builder, node *TreeNode, prefix string, isLast bool, 
 		if node.Info != "" {
 			label = fmt.Sprintf("%s [%s]", node.Label, node.Info)
 		}
+		if activeIDs[node.ID] {
+			label = "▶ " + label
+			statusStyle = TreeRewardActiveStyle
+		}
 		line = fmt.Sprintf("%s%s%s", prefix, connector, statusStyle.Render(fmt.Sprintf("%s %s", statusIcon, label)))
 	}
 
@@ -343,11 +362,20 @@ func renderNode(b *strings.Builder, node *TreeNode, prefix string, isLast bool, 
 
 	// Render children
 	for i, child := range node.Children {
-		renderNode(b, child, prefix+childPrefix, i == len(node.Children)-1, maxWidth)
+		renderNode(b, child, prefix+childPrefix, i == len(node.Children)-1, maxWidth, activeIDs)
 	}
 }
 
 // ---- Helpers ----
+
+// truncateRunes shortens s to at most max runes, appending an ellipsis.
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max-1]) + "…"
+}
 
 // formatDuration formats a duration as MM:SS.
 func formatDuration(d time.Duration) string {
@@ -464,6 +492,7 @@ func BuildTreeFromRewards(
 				}
 
 				rewardNode := &TreeNode{
+					ID:       r.ID,
 					Label:    r.Name,
 					Icon:     rewardIcon,
 					Info:     info,

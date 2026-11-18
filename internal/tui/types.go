@@ -2,6 +2,7 @@ package tui
 
 // TreeNode represents a node in the drops tree display.
 type TreeNode struct {
+	ID       string // reward ID, used to highlight the active drop
 	Label    string // display text
 	Icon     string // optional emoji/icon prefix
 	Info     string // extra info like "60%", "Claimed"
@@ -25,6 +26,13 @@ type StatusUpdateMsg struct {
 	Streamer string
 	Status   string
 	Elapsed  string // optional pre-formatted elapsed string
+}
+
+// ActiveDropMsg tells the TUI which rewards are currently being farmed.
+// An empty message clears the highlight.
+type ActiveDropMsg struct {
+	RewardIDs []string
+	Label     string
 }
 
 // TimerTickMsg is sent every second to update the elapsed timer.

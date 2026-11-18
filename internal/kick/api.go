@@ -84,7 +84,8 @@ func (c *Client) GetRandomStreamFromCategory(categoryID, limit int) (*Livestream
 	}
 
 	chosen := streams[idx]
-	log.Printf("  [API] → Picked streamer #%d: %s (channel %d)\n", idx, chosen.Channel.Username, chosen.Channel.ID)
+	log.Printf("  [API] → Picked streamer #%d: %s (slug %s, channel %d)\n",
+		idx, chosen.Channel.Username, chosen.Channel.Slug, chosen.Channel.ID)
 	return &chosen, nil
 }
 
@@ -169,7 +170,7 @@ func (c *Client) GetToken(cookies map[string]string) (string, error) {
 		return "", fmt.Errorf("session_token not found in cookies")
 	}
 
-	log.Printf("  [API] Session token found: %s...\n", cookies["session_token"][:30])
+	log.Println("  [API] Session token found")
 	log.Println("  [API] GET https://websockets.kick.com/viewer/v1/token")
 
 	req, err := c.NewRequest(http.MethodGet, "https://websockets.kick.com/viewer/v1/token", cookies)

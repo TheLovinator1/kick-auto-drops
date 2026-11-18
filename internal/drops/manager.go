@@ -2,6 +2,7 @@ package drops
 
 import (
 	"math"
+	"sort"
 
 	"kickautodrops/internal/kick"
 	"kickautodrops/internal/log"
@@ -9,13 +10,13 @@ import (
 
 // ---- Collect usernames ----
 
-// CollectUsernames returns all type-1 (streamer) targets that are not yet claimed
-// and still have remaining time.
+// CollectUsernames returns all type-1 (streamer) targets that still have
+// remaining time. Claim state is left for the caller to decide.
 func (m *Manager) CollectUsernames() []StreamerTarget {
 	var targets []StreamerTarget
 
 	for _, r := range m.rewards {
-		if r.Type != 1 || len(r.Usernames) == 0 {
+		if r.Type != 1 || len(r.Usernames) == 0 || r.Claimed {
 			continue
 		}
 		for _, username := range r.Usernames {
@@ -23,6 +24,7 @@ func (m *Manager) CollectUsernames() []StreamerTarget {
 				Username:        username,
 				RequiredSeconds: int(r.RemainingUnits * 60),
 				Claimed:         r.Claimed,
+				CategoryID:      r.CategoryID,
 			})
 		}
 	}
@@ -30,56 +32,96 @@ func (m *Manager) CollectUsernames() []StreamerTarget {
 	return targets
 }
 
-// ---- Get remaining time ----
+// ---- Category-wide (type 2) queries ----
 
-// GetRemainingTime returns remaining seconds for a username, falling back to
-// the type=2 (general) reward if no streamer-specific match is found.
-func (m *Manager) GetRemainingTime(username string) int {
+// GeneralCategories returns the IDs of categories that still have at least one
+// unclaimed category-wide reward. This is what general mode should farm: the
+// category belongs to the campaign, not to a CLI flag.
+func (m *Manager) GeneralCategories() []int {
+	seen := make(map[int]bool)
+	var categories []int
 	for _, r := range m.rewards {
-		if r.Type == 1 && contains(r.Usernames, username) {
-			return int(r.RemainingUnits * 60)
+		if r.Type != 2 || r.Claimed || r.CategoryID == 0 || seen[r.CategoryID] {
+			continue
+		}
+		seen[r.CategoryID] = true
+		categories = append(categories, r.CategoryID)
+	}
+	sort.Ints(categories)
+	return categories
+}
+
+// GeneralRemainingSeconds returns how long to keep watching a stream in the
+// given category. Watching one category-wide stream advances every unclaimed
+// reward in that category, so we must wait for the one that needs the most
+// time instead of only looking at the first reward.
+func (m *Manager) GeneralRemainingSeconds(categoryID int) int {
+	var remaining float64
+	for _, r := range m.rewards {
+		if r.Type != 2 || r.Claimed || r.RemainingUnits <= 0 {
+			continue
+		}
+		if categoryID != 0 && r.CategoryID != categoryID {
+			continue
+		}
+		if r.RemainingUnits > remaining {
+			remaining = r.RemainingUnits
 		}
 	}
-	// Fallback to general
-	for _, r := range m.rewards {
-		if r.Type == 2 {
-			return int(r.RemainingUnits * 60)
-		}
-	}
-	return 0
+	return int(remaining * 60)
 }
 
 // ---- Record progress ----
 
-// RecordProgress decrements the remaining units for the given username by the
-// watched seconds. Falls back to the type=2 (general) reward if no match.
-func (m *Manager) RecordProgress(username string, watchedSeconds int) {
+// RecordGeneralProgress credits a category-wide watch session to every
+// unclaimed type-2 reward in that category. It never touches rewards from
+// other categories or streamer-specific rewards.
+func (m *Manager) RecordGeneralProgress(categoryID int, watchedSeconds int) {
 	watchedMinutes := round(float64(watchedSeconds)/60.0, 1)
+	credited := 0
 
 	for i := range m.rewards {
 		r := &m.rewards[i]
-		if r.Type == 1 && contains(r.Usernames, username) {
-			old := r.RemainingUnits
-			r.RemainingUnits = round(math.Max(0, old-watchedMinutes), 1)
-			log.Printf("  [Progress] %s: %.1f → %.1f min remaining (-%.1f min watched)\n",
-				username, old, r.RemainingUnits, watchedMinutes)
-			return
+		if r.Type != 2 || r.Claimed || r.RemainingUnits <= 0 {
+			continue
 		}
+		if categoryID != 0 && r.CategoryID != categoryID {
+			continue
+		}
+		old := r.RemainingUnits
+		r.RemainingUnits = round(math.Max(0, old-watchedMinutes), 1)
+		credited++
+		log.Printf("  [Progress] General %s (category %d): %.1f → %.1f min remaining (-%.1f min watched)\n",
+			r.Name, r.CategoryID, old, r.RemainingUnits, watchedMinutes)
 	}
 
-	// Fallback to general
+	if credited == 0 {
+		log.Printf("⚠️ No unclaimed general rewards in category %d to credit\n", categoryID)
+	}
+}
+
+// RecordStreamerProgress credits a streamer-specific watch session to the
+// type-1 rewards that contain the username. It never falls back to general
+// rewards: those have their own category and are farmed separately.
+func (m *Manager) RecordStreamerProgress(username string, watchedSeconds int) {
+	watchedMinutes := round(float64(watchedSeconds)/60.0, 1)
+	credited := 0
+
 	for i := range m.rewards {
 		r := &m.rewards[i]
-		if r.Type == 2 {
-			old := r.RemainingUnits
-			r.RemainingUnits = round(math.Max(0, old-watchedMinutes), 1)
-			log.Printf("  [Progress] General: %.1f → %.1f min remaining (-%.1f min watched, via fallback)\n",
-				old, r.RemainingUnits, watchedMinutes)
-			return
+		if r.Type != 1 || r.Claimed || !contains(r.Usernames, username) {
+			continue
 		}
+		old := r.RemainingUnits
+		r.RemainingUnits = round(math.Max(0, old-watchedMinutes), 1)
+		credited++
+		log.Printf("  [Progress] %s: %.1f → %.1f min remaining (-%.1f min watched)\n",
+			username, old, r.RemainingUnits, watchedMinutes)
 	}
 
-	log.Printf("⚠️ %s not found, no general entry either\n", username)
+	if credited == 0 {
+		log.Printf("⚠️ %s is not part of any streamer-specific drop\n", username)
+	}
 }
 
 // ---- Sync from server ----

@@ -27,6 +27,7 @@ type StreamerTarget struct {
 	Username        string
 	RequiredSeconds int
 	Claimed         bool
+	CategoryID      int // category of the campaign the target belongs to
 }
 
 // Manager holds in-memory state of all tracked rewards.

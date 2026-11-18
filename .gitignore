@@ -27,3 +27,4 @@ vendor/
 # Kick autodrops specific
 cookies.txt
 *.txt
+/kickautodrops

@@ -49,6 +49,7 @@ type Livestream struct {
 
 type LivestreamChannel struct {
 	ID       int    `json:"id"`
+	Slug     string `json:"slug"`
 	Username string `json:"username"`
 }
 

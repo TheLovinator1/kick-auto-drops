@@ -17,7 +17,7 @@ import (
 func main() {
 	// Parse CLI flags
 	modeStr := flag.String("mode", "streamer", "farming mode: streamer or general")
-	categoryID := flag.Int("category", 13, "game category ID (13 = Rust)")
+	categoryID := flag.Int("category", 0, "filter drops by game category ID (0 = auto-detect from active campaigns, 13 = Rust)")
 	flag.Parse()
 
 	// Determine farming mode

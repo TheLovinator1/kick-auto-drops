@@ -36,3 +36,25 @@ go build -o kickautodrops .
 # Run it
 ./kickautodrops
 ```
+
+## Usage
+
+`-mode` selects which kind of drop campaign to farm. The streams themselves are
+picked automatically from the active campaigns — you don't choose a streamer.
+
+```bash
+# Farm streamer-specific campaigns: the app watches their listed streamers when they are live
+./kickautodrops -mode streamer
+
+# Farm category-wide campaigns: the app picks live streams from each campaign's game category
+./kickautodrops -mode general
+
+# Restrict farming to one game category (13 = Rust)
+./kickautodrops -mode general -category 13
+```
+
+`-category` is optional. When omitted (the default), the category is taken from
+each active drop campaign, so category-wide drops keep working even when the
+default Rust campaign is not running.
+
+To find a game/category ID, browse <https://ttvdrops.lovinator.space/kick/games/>.

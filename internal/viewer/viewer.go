@@ -13,9 +13,11 @@ import (
 
 // ViewStream orchestrates a full stream-watching session under the given context.
 // Loads cookies → gets token → gets channel ID → starts WebSocket.
-// Progress updates are recorded in the Manager.
+// Progress updates are recorded in the Manager. general=true means this is a
+// category-wide session, so progress is credited by category instead of by
+// streamer name.
 // If cookieMap is nil, cookies are loaded from cookies.txt on disk.
-func ViewStream(ctx context.Context, client *kick.Client, mgr *drops.Manager, username string, categoryID int, cookieMap map[string]string) (earlyEnd bool, err error) {
+func ViewStream(ctx context.Context, client *kick.Client, mgr *drops.Manager, username string, categoryID int, general bool, cookieMap map[string]string) (earlyEnd bool, err error) {
 	if cookieMap == nil {
 		log.Printf("  \u2192 Step 1/4: Loading cookies from disk...\n")
 		var loadErr error
@@ -46,7 +48,11 @@ func ViewStream(ctx context.Context, client *kick.Client, mgr *drops.Manager, us
 
 	go func() {
 		for update := range progressChan {
-			mgr.RecordProgress(update.Username, update.WatchedMillis/1000)
+			if general {
+				mgr.RecordGeneralProgress(categoryID, update.WatchedMillis/1000)
+			} else {
+				mgr.RecordStreamerProgress(update.Username, update.WatchedMillis/1000)
+			}
 		}
 	}()
 
@@ -76,6 +82,7 @@ func RunWithTimer(
 	mgr *drops.Manager,
 	username string,
 	categoryID int,
+	general bool,
 	timeout time.Duration,
 	cookieMap map[string]string,
 ) (earlyEnd bool, err error) {
@@ -90,7 +97,7 @@ func RunWithTimer(
 	}, 1)
 
 	go func() {
-		early, err := ViewStream(ctx, client, mgr, username, categoryID, cookieMap)
+		early, err := ViewStream(ctx, client, mgr, username, categoryID, general, cookieMap)
 		resultCh <- struct {
 			early bool
 			err   error
